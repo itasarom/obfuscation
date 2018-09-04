@@ -5,6 +5,7 @@ import torch
 import ast
 import matplotlib.pyplot as plt
 import obfuscation
+import astor
 from IPython import display
 from sklearn.metrics.pairwise import cosine_similarity
 import seaborn as sns
@@ -103,9 +104,14 @@ class Batcher:
             
             def get_data(x, y):
                 assert len(x) == len(y)
-                result = defaultdict(list)
+                result = defaultdict()
                 for x_cur, y_cur in zip(x, y):
-                    result[classes_back[y_cur]].append(x_cur)
+                    name_cur = classes_back[y_cur]
+                    if name_cur not in result:
+                        result[name_cur] = defaultdict(list)
+                        
+                    cur = result[name_cur]
+                    cur[len(cur)] = x_cur
                 
                 return result
                     
@@ -180,11 +186,13 @@ def get_n_obfuscated_representations(ast_encoder, code, n_tests, obfuscation_par
     data_points = []
     obfuscated_list = []
     for i in range(n_tests):
+#             print(code)
             obfuscated = obfuscation.obfuscate(code, obfuscation_params)
+#             print(obfuscated)
             obfuscated_list.append(obfuscated)
             obfuscated_repr = ast_encoder(ast.parse(obfuscated)).view(1, -1)
             data_points.append(obfuscated_repr)
-            
+#     print("OK")
     return data_points, obfuscated_list
 
 def get_self_similarity_matrix(ast_encoder, code, n_tests, obfuscation_params):
@@ -322,7 +330,7 @@ def order_names_by_count(batcher):
     for name in batcher.classes:
         lengths.append(len(batcher.train_data[name]))
     
-    print(lengths)
+#     print(lengths)
     
     return np.array(batcher.classes)[np.argsort(-np.array(lengths))]
 
@@ -432,7 +440,7 @@ class Trainer:
 #             self.ast_encoder.eval()
             for code, adversarial_code_list in batcher.train_code(params['train_n_problems'], params['n_adversarial']):
 #                 print(adversarial_code_list)
-#                 print(code)
+                
 #             for iter_id in range(params['n_problems_per_epoch']):
 #                 n_users = len(data)
 #                 current_user = list(sorted(data.keys()))[np.random.choice(n_users)]
@@ -441,6 +449,7 @@ class Trainer:
 #                 code = list(sorted(current_data.keys()))[np.random.choice(cur_len)]
 #                 code = batcher.get_train_code()
                 cur_loss, cur_reprs, _ = loss_for_problem(self.ast_encoder, code, params['n_obfuscated'], obfuscation_params)
+#                 print("OK")
                 
                 current_losses.append(cur_loss)
                 cur_reg = cur_reprs.norm(dim=1).mean()
@@ -485,6 +494,139 @@ class Trainer:
                     current_regularizers.append(cur_reg)
                     
                     adversarial_loss, _, _ = loss_adversarial(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
+                    adversarial_losses.append(adversarial_loss)
+            
+                loss = sum(current_losses)/len(current_losses)
+                regularizer = torch.abs(1 - sum(current_regularizers)/len(current_regularizers))
+                adversarial = sum(adversarial_losses)/len(adversarial_losses)
+                self.validation_metrics['loss'].append(loss.detach().item())
+                self.validation_metrics['iterations'].append(len(self.train_metrics['loss']) - 1)
+                self.validation_metrics['regularizer'].append(regularizer.detach().item())
+                self.validation_metrics['adversarial'].append(adversarial.detach().item())
+                
+                self.is_best_state()
+
+            self.plot_all()
+
+def get_n_obfuscated_representations_mixed(ast_encoder, code, code_list, obfuscation_params):
+    data_points = []
+    obfuscated_list = []
+#     print(code)
+    for other_code in code_list:
+#             print("=================")
+#             print(other_code)
+            obfuscated = obfuscation.obfuscate_mixed(code, other_code, obfuscation_params)
+            obfuscated_list.append(obfuscated)
+            obfuscated_repr = ast_encoder(ast.parse(obfuscated)).view(1, -1)
+            data_points.append(obfuscated_repr)
+    return data_points, obfuscated_list
+            
+            
+def loss_for_problem_mixed(ast_encoder, code, code_list, obfuscation_params):
+
+    obfuscated_repr, obfuscated = get_n_obfuscated_representations_mixed(ast_encoder, code, code_list, obfuscation_params)
+    obfuscated_repr = torch.cat(obfuscated_repr, dim=0)
+    
+    original_repr = ast_encoder(ast.parse(code)).view(1, -1)
+    
+    original_repr = original_repr.repeat(len(code_list), 1)
+    
+#     print(cosine_similarity(original_repr.detach(), obfuscated_repr.detach()))
+#     print(torch.nn.functional.cosine_similarity(original_repr, obfuscated_repr))
+    loss = torch.nn.functional.cosine_similarity(original_repr, obfuscated_repr).mean()
+    
+    
+    return loss, obfuscated_repr, obfuscated
+
+def loss_adversarial_mixed(ast_encoder, code, code_list, obfuscation_params):
+    
+    
+    
+    all_repr = []
+    all_obfuscated_code = []
+    for adversarial_code in code_list:
+        obfuscated_repr, obfuscated = get_n_obfuscated_representations_mixed(ast_encoder, adversarial_code, [code], obfuscation_params)
+
+        all_repr += obfuscated_repr
+        all_obfuscated_code += obfuscated
+    
+    
+    
+    original_repr = ast_encoder(ast.parse(code)).view(1, -1)
+    
+    if not code_list:
+        return 0.0, torch.zeros_like(original_repr), []
+    
+    original_repr = original_repr.repeat(len(all_repr), 1)
+
+    
+                                             
+    obfuscated_repr = torch.cat(all_repr, dim=0)
+    
+    loss = torch.nn.functional.cosine_similarity(original_repr, obfuscated_repr).mean()
+    
+    
+    return loss, obfuscated_repr, obfuscated          
+        
+
+            
+class MixingTrainer(Trainer):
+        
+        
+    def train(self, batcher, params, obfuscation_params):
+        self.all_params.append(copy.deepcopy((params, obfuscation_params)))
+        batcher.dump(self.path, override=True)
+        for epoch_id in range(params['n_epochs']):
+            current_losses = []
+            current_regularizers = []
+            adversarial_losses = []
+            self.ast_encoder.train()
+            for code, adversarial_code_list in batcher.train_code(params['train_n_problems'], params['n_adversarial']):
+                cur_loss, cur_reprs, _ = loss_for_problem_mixed(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
+                
+                current_losses.append(cur_loss)
+                cur_reg = cur_reprs.norm(dim=1).mean()
+                current_regularizers.append(cur_reg)
+                
+                adversarial_loss, _, _ = loss_adversarial_mixed(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
+                adversarial_losses.append(adversarial_loss)
+#                 cur_reprs = cur_reprs.detach().numpy()
+#                 sns.heatmap(cosine_similarity(cur_reprs, cur_reprs),  vmin=0.0, vmax=1.0)
+#                 plt.show()
+
+
+            self.optimizer.zero_grad()
+            loss = sum(current_losses)/len(current_losses)
+            regularizer = torch.abs(1 - sum(current_regularizers)/len(current_regularizers))
+            adversarial = sum(adversarial_losses)/len(adversarial_losses)
+            real_loss = -loss + params['regularizer_coef'] * regularizer + params['adversarial_coef'] * adversarial
+#             real_loss = -loss + params['adversarial_coef'] * adversarial
+            real_loss.backward()
+            self.optimizer.step()
+            self.train_metrics['regularizer'].append(regularizer.detach().item())
+            self.train_metrics['loss'].append(loss.detach().item())
+            self.train_metrics['adversarial'].append(adversarial.detach().item())
+            
+            self.dump(os.path.join(self.path, "last_state"), override=True)
+            
+            self.ast_encoder.eval()
+            if epoch_id % params['validate_every'] == 0:
+                current_losses = []
+                current_regularizers = []
+                adversarial_losses = []
+#                 for iter_id in range(n_problems_validation):
+#                     n_users = len(data)
+#                     current_user = list(sorted(data.keys()))[np.random.choice(n_users)]
+#                     current_data = data[current_user]
+#                     cur_len = len(current_data)
+#                     code = list(sorted(current_data.keys()))[np.random.choice(cur_len)]
+                for code, adversarial_code_list in batcher.validation_code(params['validate_n_problems'], params['n_adversarial']):
+                    cur_loss, cur_reprs, _ = loss_for_problem_mixed(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
+                    current_losses.append(cur_loss)
+                    cur_reg = cur_reprs.norm(dim=1).mean()
+                    current_regularizers.append(cur_reg)
+                    
+                    adversarial_loss, _, _ = loss_adversarial_mixed(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
                     adversarial_losses.append(adversarial_loss)
             
                 loss = sum(current_losses)/len(current_losses)

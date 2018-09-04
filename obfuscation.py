@@ -140,6 +140,72 @@ if False:
 """
 
 parsed_trash = ast.parse(trash_code)
+
+def traverse_extract(node):
+    result = []
+    
+    if type(node) == ast.FunctionDef:
+        result.append(copy.deepcopy(node))
+        
+    if hasattr(node, "body") and isinstance(node.body, list):
+        result.append(copy.deepcopy(node.body))
+    
+    for child in ast.iter_child_nodes(node):
+        result += traverse_extract(child)
+    
+    return result
+
+def extract_patches(node):
+    node = copy.deepcopy(node)
+    
+    return traverse_extract(node)
+    
+
+def add_patches_to_code(node, patches, n, params):
+    node = copy.deepcopy(node)
+    assert hasattr(node, "body") and isinstance(node.body, list)
+    
+    for i in range(n):
+        position = np.random.randint(max(len(node.body), 1))
+        
+#         print(">>>>>", patches)
+        to_insert = patches[np.random.randint(len(patches))]
+        if isinstance(to_insert, list):
+            to_insert = to_insert[:np.random.randint(len(to_insert))]
+            if len(to_insert) > params['max_frac_to_insert'] * len(node.body):
+                continue
+            node.body = node.body[:position] + copy.deepcopy(to_insert) + node.body[position:]
+        elif params['add_functions']:
+#             continue
+            node.body = node.body[:position] + [copy.deepcopy(to_insert)] + node.body[position:]
+    
+    
+    return node
+
+def traverse_add_patches(node, patches, params):
+    node = copy.deepcopy(node)
+    
+    for child in ast.iter_child_nodes(node):
+        traverse_add_patches(child, patches, params)
+        
+        
+    if hasattr(node, "body") and isinstance(node.body, list) and np.random.rand() < params['modify_add_patches']:
+        node = add_patches_to_code(node, patches, np.random.randint(params['max_patches_to_body']), params)
+    
+    return node
+        
+        
+
+def modify_insert_code(a, b, params):
+    a = copy.deepcopy(a)
+    b = copy.deepcopy(b)
+
+    patches = extract_patches(b)
+#     print(patches)
+    
+    result = traverse_add_patches(a, patches, params)
+    
+    return result
     
     
 def add_trash_to_body(node, n):
@@ -156,7 +222,7 @@ def add_trash_to_body(node, n):
 
 
 def modify(node, params):
-    
+    node = copy.deepcopy(node)
     
     if type(node) == ast.FunctionDef:
         if np.random.rand() < params['add_kvargs']:
@@ -206,6 +272,14 @@ def obfuscate(code, params):
     result = parsed
     for i in range(params['n_modification_depth']):
         result = modify(result, params)
+    
+    
+    return astor.code_gen.to_source(result)
+
+
+def obfuscate_mixed(code, other, params):
+
+    result = modify_insert_code(ast.parse(code), ast.parse(other), params)
     
     
     return astor.code_gen.to_source(result)
