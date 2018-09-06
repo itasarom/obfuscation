@@ -13,6 +13,45 @@ import os
 import pickle as pkl
 import copy
 
+def predict(ast_encoder, code, candidates):
+    representations = []
+    for other in candidates:
+        representations.append(ast_encoder(ast.parse(other)).detach().numpy().reshape(1, -1))
+    
+    representations = np.vstack(representations)
+    
+    code_repr = ast_encoder(ast.parse(code)).detach().numpy().reshape(1, -1)
+    
+    sim = cosine_similarity(code_repr, representations)
+    
+                           
+    return sim.argmax(), sim
+
+
+def compare_cos(ast_encoder, data, func):
+    keys = sorted(data.keys())
+    
+    result = []
+    
+    for current in keys:
+            cur_res = []
+            for other in keys:
+                acc = []
+                for code in data[current].values():
+                        res = predict(ast_encoder, code, data[other].values())[1]
+                        acc.append(res)
+                
+                res = np.concatenate(res)
+                cur_res.append(func(res))
+                
+            result.append(cur_res)
+            
+    return result
+               
+     
+    
+
+
 def sample_from_data(data):
     n_users = len(data)
     current_user = list(sorted(data.keys()))[np.random.choice(n_users)]
@@ -208,14 +247,25 @@ def get_self_similarity_matrix(ast_encoder, code, n_tests, obfuscation_params):
 def get_multi_similarity_matrix(ast_encoder, code_list, n_tests, obfuscation_params):
     data_points = []
     indices_by_user = []
+    codes = []
     for code in code_list:
         indices_by_user.append(list(range(len(data_points), len(data_points) + n_tests + 1, 1)))
         data_points.append(ast_encoder(ast.parse(code)).view(1, -1))
-        data_points += get_n_obfuscated_representations(ast_encoder, code, n_tests, obfuscation_params)[0]
+        codes.append(code)
+        tmp = get_n_obfuscated_representations(ast_encoder, code, n_tests, obfuscation_params)
+        data_points += tmp[0]
+        codes += tmp[1]
         
     
     data_points = torch.cat(data_points, dim=0).detach().numpy()
-    return cosine_similarity(data_points, data_points), indices_by_user
+    
+    result = []
+    for data_point in data_points:
+#         print("OK")
+        result.append(cosine_similarity(data_point.reshape(1, -1), data_points).reshape(1, -1))
+    
+    result = np.vstack(result)
+    return result, indices_by_user, codes
 
 # The old version
 # def precision_higher(sim, indices, data_indices):
@@ -240,37 +290,37 @@ def get_multi_similarity_matrix(ast_encoder, code_list, n_tests, obfuscation_par
      
 #     return result
 
-def precision_higher(sim, indices, data_indices):
+def precision_higher(sim, problem_indices, indices_by_problem):
     indices_by_user = []
-    for data_index in data_indices:
+    for problem_index in indices_by_problem:
         current = []
-        for id in data_index:
-            current += indices[id]
+        for id in problem_index:
+            current += problem_indices[id]
         indices_by_user.append(current)
     
     result = []
     n_cols = sim.shape[1]
-    for cls_id, indices in enumerate(indices_by_user):
+    for cls_id, problem_indices in enumerate(indices_by_user):
         
         current_correct = 0
-        for row in indices:
+        for row in problem_indices:
             argmaxes = (-sim[row]).argsort()
             for argmax in argmaxes:
                 if argmax != row:
                     break
-            if argmax in indices:
+            if argmax in problem_indices:
                 current_correct += 1
         
-        result.append(current_correct/len(indices))
+        result.append(current_correct/len(problem_indices))
      
     return result
 
-def precision_lower(sim, indices, data_indices):
+def precision_lower(sim, problem_indices, indices_by_problem):
     indices_by_user = []
-    for data_index in data_indices:
+    for problem_index in indices_by_problem:
         current = []
-        for id in data_index:
-            current.append(indices[id])
+        for id in problem_index:
+            current.append(problem_indices[id])
         indices_by_user.append(current)
     
     result = []
@@ -318,11 +368,11 @@ def create_similarity_matrix(ast_encoder, names, data, obfuscation_params, n_fir
         end = len(data_points)
         data_indices.append(list(range(start, end, 1)))
 
-    sim, indices = get_multi_similarity_matrix(ast_encoder, data_points, n_obfuscated, obfuscation_params)
+    sim, indices, codes = get_multi_similarity_matrix(ast_encoder, data_points, n_obfuscated, obfuscation_params)
 #     plt.figure(figsize=(15, 15))
 #     sns.heatmap(sim, vmin=-1.0, vmax=1.0)
     
-    return sim, indices, data_indices
+    return sim, indices, data_indices, codes
 
 
 def order_names_by_count(batcher):
@@ -346,13 +396,14 @@ def print_validation_result(sim, indices, data_indices):
     plt.show()
 
 def validate(ast_encoder, batcher, long_names, obfuscation_params, n_first_for_person, n_obfuscated):
-    sim, indices, data_indices = create_similarity_matrix(ast_encoder, long_names, batcher.train_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
-    print("Train:")
-    print_validation_result(sim, indices, data_indices)
+#     sim, indices, data_indices, codes = create_similarity_matrix(ast_encoder, long_names, batcher.train_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
+#     print("Train:")
+#     print_validation_result(sim, indices, data_indices)
     
-    sim, indices, data_indices = create_similarity_matrix(ast_encoder, long_names, batcher.test_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
+    sim, indices, data_indices, codes = create_similarity_matrix(ast_encoder, long_names, batcher.test_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
     print("Test:")
     print_validation_result(sim, indices, data_indices)
+    return sim, indices, data_indices, codes
 
 
 def dump(trainer, dir_name, override=False):
@@ -538,14 +589,16 @@ def loss_for_problem_mixed(ast_encoder, code, code_list, obfuscation_params):
     
     return loss, obfuscated_repr, obfuscated
 
-def loss_adversarial_mixed(ast_encoder, code, code_list, obfuscation_params):
+def loss_adversarial_mixed(ast_encoder, code, code_list, n_samples_for_adversarial, obfuscation_params):
     
     
     
     all_repr = []
     all_obfuscated_code = []
     for adversarial_code in code_list:
-        obfuscated_repr, obfuscated = get_n_obfuscated_representations_mixed(ast_encoder, adversarial_code, [code], obfuscation_params)
+        other_codes = np.random.choice(code_list, n_samples_for_adversarial)
+#         print(astor.to_source(other_codes[0]))
+        obfuscated_repr, obfuscated = get_n_obfuscated_representations_mixed(ast_encoder, adversarial_code, other_codes, obfuscation_params)
 
         all_repr += obfuscated_repr
         all_obfuscated_code += obfuscated
@@ -588,7 +641,7 @@ class MixingTrainer(Trainer):
                 cur_reg = cur_reprs.norm(dim=1).mean()
                 current_regularizers.append(cur_reg)
                 
-                adversarial_loss, _, _ = loss_adversarial_mixed(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
+                adversarial_loss, _, _ = loss_adversarial_mixed(self.ast_encoder, code, adversarial_code_list, params['n_samples_for_adversarial'], obfuscation_params)
                 adversarial_losses.append(adversarial_loss)
 #                 cur_reprs = cur_reprs.detach().numpy()
 #                 sns.heatmap(cosine_similarity(cur_reprs, cur_reprs),  vmin=0.0, vmax=1.0)
@@ -626,7 +679,7 @@ class MixingTrainer(Trainer):
                     cur_reg = cur_reprs.norm(dim=1).mean()
                     current_regularizers.append(cur_reg)
                     
-                    adversarial_loss, _, _ = loss_adversarial_mixed(self.ast_encoder, code, adversarial_code_list, obfuscation_params)
+                    adversarial_loss, _, _ = loss_adversarial_mixed(self.ast_encoder, code, adversarial_code_list, params['n_samples_for_adversarial'], obfuscation_params)
                     adversarial_losses.append(adversarial_loss)
             
                 loss = sum(current_losses)/len(current_losses)
