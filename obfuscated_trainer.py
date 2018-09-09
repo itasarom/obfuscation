@@ -157,6 +157,39 @@ class Batcher:
              
             self.train_data = get_data(train_x, d["y_train"])
             self.test_data = get_data(test_x, d["y_test"])
+    
+    
+    def load_from_attribution_batcher_restore_names(self, data, dir_name):
+        with open(os.path.join(dir_name, "batcher_state.pkl"), "rb") as f:
+            d = pkl.load(f)
+            
+            self.classes = d['classes']
+            
+            classes_back = {id:name for id, name in enumerate(self.classes)}
+            if hasattr(self, "raw_x_train"):
+                train_x = d["raw_x_train"]
+                test_x = d["raw_x_test"]
+            else:
+                train_x = d["x_train"]
+                test_x = d["x_test"]
+            
+            def get_data(x, y):
+                assert len(x) == len(y)
+                result = defaultdict()
+                for x_cur, y_cur in zip(x, y):
+                    name_cur = classes_back[y_cur]
+                    if name_cur not in result:
+                        result[name_cur] = defaultdict(list)
+                        
+                    cur = result[name_cur]
+                    cur[len(cur)] = x_cur
+                
+                return result
+                    
+             
+            self.train_data = get_data(train_x, d["y_train"])
+            self.test_data = get_data(test_x, d["y_test"])
+        
         
                 
             
@@ -411,6 +444,8 @@ def get_samples_for_data(ast_encoder, data, obfuscation_params, max_for_user, n_
     result = {}
     for name in names:
         result[name] = get_samples_for_user(ast_encoder, data[name], obfuscation_params, max_for_user, n_obfuscated)
+        
+    result["#fictional"] = get_samples_for_user(ast_encoder, {i:"" for i in range(max_for_user + 1)}, obfuscation_params, max_for_user, n_obfuscated)
     
     return result
 
@@ -421,7 +456,8 @@ def build_similarity_matrix(samples):
     indices = defaultdict(lambda: defaultdict(dict))
     back_indices = []
     codes = []
-    for name, results_for_name in samples.items():
+    for name in sorted(samples):
+        results_for_name = samples[name]
         for problem, cur in results_for_name.items():
             id = len(representations)
             
@@ -459,16 +495,16 @@ def order_names_by_count(batcher):
     
     return np.array(batcher.classes)[np.argsort(-np.array(lengths))]
 
-# def print_validation_result(sim, indices, data_indices):
-#     acc = precision_lower(sim, indices, data_indices)
-#     print(np.mean(acc[1]))
-#     print(np.mean(acc[0]))
-#     # acc[0]
-#     acc = precision_higher(sim, indices, data_indices)
-#     print(np.mean(acc))
-#     plt.figure(figsize=(15, 15))
-#     sns.heatmap(sim, vmin=-1.0, vmax=1.0)
-#     plt.show()
+def print_validation_result(sim, indices, data_indices):
+    acc = precision_lower(sim, indices, data_indices)
+    print(np.mean(acc[1]))
+    print(np.mean(acc[0]))
+    # acc[0]
+    acc = precision_higher(sim, indices, data_indices)
+    print(np.mean(acc))
+    plt.figure(figsize=(15, 15))
+    sns.heatmap(sim, vmin=-1.0, vmax=1.0)
+    plt.show()
 
     
 def calculate_metric_counters(sim, indices, back_indices):
@@ -476,6 +512,7 @@ def calculate_metric_counters(sim, indices, back_indices):
     counter_same_user_original = Counter()
     counter_same_problem_user = Counter()
     counter_true = Counter()
+    counter_true_original = Counter()
     counter_det = Counter()
     
     for row_id, row in enumerate(sim):
@@ -487,6 +524,8 @@ def calculate_metric_counters(sim, indices, back_indices):
         
         det_user, det_problem, det_type = back_indices[argmax]
         counter_det[det_user] += 1
+        if obf_type == "original":
+            counter_true_original[real_user] += 1
         if det_user == real_user:
             counter_same_user[real_user] += 1
             if obf_type == "original":
@@ -499,22 +538,24 @@ def calculate_metric_counters(sim, indices, back_indices):
              "counter_same_user_original":counter_same_user_original,
              "counter_same_problem_user":counter_same_problem_user,
              "counter_true":counter_true,
-             "counter_det":counter_det
+             "counter_det":counter_det,
+             "counter_true_original":counter_true_original
             }
 
 def calculate_metrics(counters):
     counter_true = counters["counter_true"]
+    counter_true_original = counters["counter_true_original"]
     same_user = {}
-    for user, cnt in counters["counter_same_user"].items():
-        same_user[user] = cnt/counter_true[user]
+    for user in counter_true.keys():
+        same_user[user] = counters["counter_same_user"][user]/counter_true[user]
     
     same_user_original = {}
-    for user, cnt in counters["counter_same_user_original"].items():
-        same_user_original[user] = cnt/counter_true[user]
+    for user in counter_true_original.keys():
+        same_user_original[user] = counters["counter_same_user_original"][user]/counter_true_original[user]
     
     same_problem_user = {}
-    for user, cnt in counters["counter_same_problem_user"].items():
-        same_problem_user[user] = cnt/counter_true[user]
+    for user in counter_true.keys():
+        same_problem_user[user] = counters["counter_same_problem_user"][user]/counter_true[user]
     
     
     #3, 2, 1
@@ -522,15 +563,16 @@ def calculate_metrics(counters):
     
     
     
-# def validate(ast_encoder, batcher, long_names, obfuscation_params, n_first_for_person, n_obfuscated):
-# #     sim, indices, data_indices, codes = create_similarity_matrix(ast_encoder, long_names, batcher.train_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
-# #     print("Train:")
-# #     print_validation_result(sim, indices, data_indices)
-    
-#     sim, indices, data_indices, codes = create_similarity_matrix(ast_encoder, long_names, batcher.test_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
-#     print("Test:")
+def validate_old(ast_encoder, batcher, long_names, obfuscation_params, n_first_for_person, n_obfuscated):
+#     sim, indices, data_indices, codes = create_similarity_matrix(ast_encoder, long_names, batcher.train_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
+#     print("Train:")
 #     print_validation_result(sim, indices, data_indices)
-#     return sim, indices, data_indices, codes
+    
+    sim, indices, data_indices, codes = create_similarity_matrix(ast_encoder, long_names, batcher.test_data, obfuscation_params, n_first_for_person=n_first_for_person, n_obfuscated=n_obfuscated)
+    print("Test:")
+    print_validation_result(sim, indices, data_indices)
+    return sim, indices, data_indices, codes
+
 def validation(samples):
     
     sim, represenations, codes, indices, back_indices = build_similarity_matrix(samples)
