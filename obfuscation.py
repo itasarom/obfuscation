@@ -266,7 +266,8 @@ example_params = {
     'max_trash_to_body':5,
     'swap_in_body':0.4
 }
-def obfuscate(code, params):
+
+def obfuscate_add_trash(code, params):
     parsed = ast.parse(code)
     
     result = parsed
@@ -275,6 +276,20 @@ def obfuscate(code, params):
     
     
     return astor.code_gen.to_source(result)
+
+def obfuscate_extract_fragments(code, params):
+    return code
+
+
+def obfuscate(code, params):
+    t = params.get("type", "add_trash")
+    if t == "add_trash":
+        return obfuscate_add_trash(code, params)
+    elif t == "extract_fragments":
+        return obfuscate_extract_fragments(code, params)
+    else:
+        raise ValueError("Incorrect obfuscation type " + t)
+    
 
 
 def obfuscate_mixed(code, other, params):
