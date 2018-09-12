@@ -895,3 +895,144 @@ class MixingTrainer(Trainer):
                 self.is_best_state()
 
             self.plot_all()
+            
+
+def sample_from_data_similar(data, n_similar, n_adversarial):
+    n_users = len(data)
+    current_user = list(sorted(data.keys()))[np.random.choice(n_users)]
+    current_data = data[current_user]
+    cur_len = len(current_data)
+#     for i in range(
+    sorted_names = list(sorted(current_data.keys()))
+    code_indices = np.random.choice(cur_len, size=n_similar)
+    codes = []
+    for code_id in code_indices:
+        codes.append(current_data[code_id])
+    
+    user_set = list(set(data.keys()) - {current_user})
+    user_list = list(sorted(user_set))
+    adversarial_list = []
+    for i in range(n_adversarial):
+        current_user = user_list[np.random.choice(n_users - 1)]
+#         print("\tAdversarial user: ", current_user)
+        current_data = data[current_user]
+        cur_len = len(current_data)
+        code_id = list(sorted(current_data.keys()))[np.random.choice(cur_len)]
+        current_code = current_data[code_id]
+        adversarial_list.append(current_code)
+    
+    return codes, adversarial_list           
+            
+class SimilarityBatcher(Batcher):
+           
+    def train_code(self, n_problems, n_similar, n_adversarial):
+        for i in range(n_problems):
+            yield sample_from_data_similar(self.train_data, n_similar, n_adversarial)
+            
+    
+    def validation_code(self, n_problems, n_similar, n_adversarial):
+        for i in range(n_problems):
+            yield sample_from_data_similar(self.train_data, n_similar, n_adversarial)
+
+
+def loss_similar(ast_encoder, codes):
+    
+    reprs = []
+    
+    for code in codes:
+        reprs.append(ast_encoder(ast.parse(code)).view(1, -1))
+    
+    reprs = torch.cat(reprs, dim=0)
+    
+    loss = 0.0
+    total_len = 0
+    for i in range(len(reprs) - 1):
+        current_len = len(reprs) - i - 1
+        total_len += current_len
+        loss += torch.nn.functional.cosine_similarity(reprs[i].view(1, -1).repeat(current_len, 1), reprs[i + 1:]).sum()
+    
+    loss /= total_len
+    
+    
+    return loss, reprs
+
+def loss_similar_adversarial(ast_encoder, codes, adversarial):
+    
+    
+    reprs = []
+    for code in codes:
+        reprs.append(ast_encoder(ast.parse(code)).view(1, -1))
+    
+    reprs = torch.cat(reprs, dim=0)
+    loss = 0
+    adv_reprs = []
+    for code in adversarial:
+        current = ast_encoder(ast.parse(code)).view(1, -1)
+        adv_reprs.append(current)
+        
+        loss += torch.nn.functional.cosine_similarity(current.repeat(len(reprs), 1), reprs).sum()
+        
+    adv_reprs = torch.cat(adv_reprs, dim=0)
+    
+    
+    return loss/(len(reprs) * len(adv_reprs)), reprs, adv_reprs
+            
+class SimilarTrainer(Trainer):       
+    def train(self, batcher, params):
+        self.all_params.append(copy.deepcopy(params))
+        batcher.dump(self.path, override=True)
+        for epoch_id in range(params['n_epochs']):
+            current_losses = []
+            current_regularizers = []
+            adversarial_losses = []
+            self.ast_encoder.train()
+            for codes, adversarial_code_list in batcher.train_code(params['train_n_problems'], params['train_n_similar'], params['n_adversarial']):
+                cur_loss, cur_reprs = loss_similar(self.ast_encoder, codes)
+                
+                current_losses.append(cur_loss)
+                cur_reg = cur_reprs.norm(dim=1).mean()
+                current_regularizers.append(cur_reg)
+                
+                adversarial_loss, _, _ = loss_similar_adversarial(self.ast_encoder, codes, adversarial_code_list)
+                adversarial_losses.append(adversarial_loss)
+
+
+            self.optimizer.zero_grad()
+            loss = sum(current_losses)/len(current_losses)
+            regularizer = torch.abs(1 - sum(current_regularizers)/len(current_regularizers))
+            adversarial = sum(adversarial_losses)/len(adversarial_losses)
+            real_loss = -loss + params['regularizer_coef'] * regularizer + params['adversarial_coef'] * adversarial
+            
+            real_loss.backward()
+            self.optimizer.step()
+            self.train_metrics['regularizer'].append(regularizer.detach().item())
+            self.train_metrics['loss'].append(loss.detach().item())
+            self.train_metrics['adversarial'].append(adversarial.detach().item())
+            
+            self.dump(os.path.join(self.path, "last_state"), override=True)
+            
+            self.ast_encoder.eval()
+            if epoch_id % params['validate_every'] == 0:
+                current_losses = []
+                current_regularizers = []
+                adversarial_losses = []
+                for code, adversarial_code_list in batcher.validation_code(params['validate_n_problems'], params['train_n_similar'], params['n_adversarial']):
+                    cur_loss, cur_reprs = loss_similar(self.ast_encoder, codes)
+                    current_losses.append(cur_loss)
+                    cur_reg = cur_reprs.norm(dim=1).mean()
+                    current_regularizers.append(cur_reg)
+                    
+                    adversarial_loss, _, _ = loss_similar_adversarial(self.ast_encoder, codes, adversarial_code_list)
+                    adversarial_losses.append(adversarial_loss)
+            
+                loss = sum(current_losses)/len(current_losses)
+                regularizer = torch.abs(1 - sum(current_regularizers)/len(current_regularizers))
+                adversarial = sum(adversarial_losses)/len(adversarial_losses)
+                self.validation_metrics['loss'].append(loss.detach().item())
+                self.validation_metrics['iterations'].append(len(self.train_metrics['loss']) - 1)
+                self.validation_metrics['regularizer'].append(regularizer.detach().item())
+                self.validation_metrics['adversarial'].append(adversarial.detach().item())
+                
+                self.is_best_state()
+
+            self.plot_all()

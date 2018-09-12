@@ -278,7 +278,40 @@ def obfuscate_add_trash(code, params):
     return astor.code_gen.to_source(result)
 
 def obfuscate_extract_fragments(code, params):
-    return code
+    patches = extract_patches(ast.parse(code))
+    
+#     if len(patches) == 0:
+#         return code
+    
+    assert 'n_patches' in params, "Param 'n_patches' is required for fragment extraction"
+    
+    body = []
+#     result = ast.Module(body=body)
+    
+    if len(patches) > params['n_patches']:
+        max_n_patches = params['n_patches']
+        n_patches = np.random.randint(params['n_patches'], len(patches))
+    else:
+        n_patches = len(patches)
+#     n_patches = np.random.randint(1, min(len(patches) + 1, params['n_patches']))
+#     n_patches = 
+#     print(len(patches), n_patches)
+    for i in range(n_patches):
+        position = np.random.randint(len(patches))
+        
+        to_insert = copy.deepcopy(patches[position])
+        if isinstance(to_insert, list):
+#             print()
+            size = np.random.randint(int(params['deflate'] * len(to_insert)), int(params['inflate'] * len(to_insert)) + 1) + 1
+            if len(to_insert) == 0:
+                continue
+            for line in np.random.choice(to_insert, size):
+                body.append(copy.deepcopy(line))
+        else:
+            body.append(to_insert)
+            
+    return astor.to_source(ast.Module(body=body))
+#         node.body = node.body[:position] + [copy.deepcopy(to_insert)] + node.body[position:]
 
 
 def obfuscate(code, params):
